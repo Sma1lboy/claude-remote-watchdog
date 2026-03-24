@@ -72,10 +72,11 @@ while IFS= read -r line; do
   pane_id=$(echo "$line" | cut -d'|' -f1)
   win_name=$(echo "$line" | cut -d'|' -f2)
 
-  # Capture the last 5 lines of the pane (includes status bar)
-  pane_content=$(tmux capture-pane -t "$pane_id" -p -S -5 2>/dev/null || true)
+  # Capture the last 5 visible lines (status bar area). Using tail on the
+  # full capture instead of -S flag, which counts from scrollback start.
+  pane_content=$(tmux capture-pane -t "$pane_id" -p 2>/dev/null | tail -5 || true)
 
-  # Skip panes without Remote Control enabled
+  # Skip panes without Remote Control in the status bar
   if ! echo "$pane_content" | grep -q "Remote Control"; then
     continue
   fi
@@ -83,18 +84,20 @@ while IFS= read -r line; do
   FOUND_ANY=true
   state_file="/tmp/claude-remote-watchdog-${pane_id//[^a-zA-Z0-9]/_}.fail"
 
-  if echo "$pane_content" | grep -q "Remote Control reconnecting"; then
+  if echo "$pane_content" | grep -q "Remote Control reconnecting\|Remote Control connecting"; then
     ALL_HEALTHY=false
+    # Both "reconnecting" and "connecting" can be stuck states.
+    # Use 2-check grace period: first hit = warn, second consecutive = auto-reconnect.
     if [[ -f "$state_file" ]]; then
       rm -f "$state_file"
-      echo "[DEAD] $win_name ($pane_id): stuck on 'reconnecting' — auto-reconnecting"
+      rc_state=$(echo "$pane_content" | grep -o "Remote Control [a-z]*" | tail -1 | awk '{print $3}')
+      echo "[DEAD] $win_name ($pane_id): stuck on '$rc_state' — auto-reconnecting"
       cycle_remote_control "$pane_id" "$win_name"
     else
       touch "$state_file"
-      echo "[WARN] $win_name ($pane_id): 'reconnecting' — confirming next check"
+      rc_state=$(echo "$pane_content" | grep -o "Remote Control [a-z]*" | tail -1 | awk '{print $3}')
+      echo "[WARN] $win_name ($pane_id): '$rc_state' — confirming next check"
     fi
-  elif echo "$pane_content" | grep -q "Remote Control connecting"; then
-    echo "[PENDING] $win_name ($pane_id): connecting..."
   else
     # "Remote Control active", "Remote Control at ...", etc.
     rm -f "$state_file" 2>/dev/null
